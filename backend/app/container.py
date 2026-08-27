@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from backend.app.core.config import Settings
 from backend.app.core.credentials import CredentialStore
 from backend.app.core.database import Database
+from backend.app.core.telemetry import LangfuseTelemetry
 from backend.app.repositories.store import (
     ArchiveRepository,
     CheckRepository,
@@ -49,6 +50,7 @@ class Container:
     archive_service: ArchiveService
     archive_jobs: dict[str, asyncio.Task[None]]
     credentials: CredentialStore
+    telemetry: LangfuseTelemetry
 
 
 def build_container(settings: Settings, adapter_override: AgentAdapter | None = None) -> Container:
@@ -64,6 +66,7 @@ def build_container(settings: Settings, adapter_override: AgentAdapter | None = 
     reviews = ReviewRepository(database)
     archives = ArchiveRepository(database)
     credentials = CredentialStore(settings)
+    telemetry = LangfuseTelemetry(settings, redact=credentials.redact)
     project_service = ProjectService(projects)
     task_service = TaskService(
         tasks=tasks,
@@ -71,7 +74,7 @@ def build_container(settings: Settings, adapter_override: AgentAdapter | None = 
         providers=providers,
         credentials=credentials,
         events=events,
-        refinement=RefinementService(),
+        refinement=RefinementService(telemetry=telemetry),
     )
     workspace_manager = WorkspaceManager(settings)
     observer = WorkspaceObserver(
@@ -91,6 +94,7 @@ def build_container(settings: Settings, adapter_override: AgentAdapter | None = 
         credentials=credentials,
         workspaces=workspace_manager,
         observer=observer,
+        telemetry=telemetry,
         adapter_override=adapter_override,
     )
     archive_service = ArchiveService(
@@ -135,4 +139,5 @@ def build_container(settings: Settings, adapter_override: AgentAdapter | None = 
         archive_service=archive_service,
         archive_jobs={},
         credentials=credentials,
+        telemetry=telemetry,
     )

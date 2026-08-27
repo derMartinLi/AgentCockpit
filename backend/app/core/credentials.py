@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import keyring
+import keyring.errors as keyring_errors
 
 from backend.app.core.config import Settings
 
@@ -22,7 +23,7 @@ class CredentialStore:
             return self.settings.api_key
         try:
             return keyring.get_password(self.SERVICE_NAME, self.USERNAME)
-        except keyring.errors.KeyringError:
+        except keyring_errors.KeyringError:
             return None
 
     def has_api_key(self) -> bool:

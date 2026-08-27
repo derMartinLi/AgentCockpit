@@ -4,7 +4,7 @@ from typing import Any
 from uuid import uuid4
 
 from backend.app.core.database import Database, json_dumps, json_loads
-from backend.app.domain.models import AgentResult, Event, TaskSpec, now_iso
+from backend.app.domain.models import AgentResult, AgentResultStatus, Event, TaskSpec, now_iso
 
 
 class ProjectRepository:
@@ -304,7 +304,7 @@ class RunRepository:
         )
         for row in rows:
             result = AgentResult(
-                status="FAILED",
+                status=AgentResultStatus.FAILED,
                 summary="Run was interrupted by an application restart and can be resumed.",
                 known_issues=["Runtime process restarted"],
                 needs_human=True,

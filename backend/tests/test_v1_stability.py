@@ -6,8 +6,10 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import cast
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.app.core.config import Settings
@@ -157,7 +159,8 @@ def test_archive_remove_failure_preserves_other_task_and_is_retryable(
         done = client.post(f"/api/tasks/{task['id']}/review/done", json={}).json()
         workspaces.append(Path(done["workspace_path"]))
 
-    manager = client.app.state.container.task_runtime.workspaces
+    container = cast(FastAPI, client.app).state.container
+    manager = container.task_runtime.workspaces
     original_git = manager._git
 
     def failing_git(
@@ -185,7 +188,7 @@ def test_archive_remove_failure_preserves_other_task_and_is_retryable(
 
     monkeypatch.setattr(manager, "_git", original_git)
     deadline = time.monotonic() + 2
-    while client.app.state.container.archive_jobs and time.monotonic() < deadline:
+    while container.archive_jobs and time.monotonic() < deadline:
         time.sleep(0.02)
     retried = client.post(f"/api/tasks/{tasks[0]['id']}/archive")
     completed = wait_for_archive(client, retried.json()["id"])
@@ -198,7 +201,7 @@ def test_sqlite_wal_handles_concurrent_event_writers(
     client: TestClient,
     registered_project: dict[str, object],
 ) -> None:
-    container = client.app.state.container
+    container = cast(FastAPI, client.app).state.container
     task = container.tasks.create(
         project_id=registered_project["id"], title="Concurrent writes", raw_request="Write"
     )

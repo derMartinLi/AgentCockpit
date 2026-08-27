@@ -132,6 +132,12 @@ AGENT_COCKPIT_MAX_CONCURRENT_RUNS=3
 
 After startup, use Settings to select the provider, model name, and an optional OpenAI-compatible base URL. API keys are read only from the environment or the operating system credential store. They are never written to SQLite, Task Specs, Events, or Agent Context files.
 
+To send AI traces to Langfuse, also set `LANGFUSE_PUBLIC_KEY`,
+`LANGFUSE_SECRET_KEY`, and the regional `LANGFUSE_BASE_URL` in `backend/.env`.
+Each Agent run is one trace; resumed runs share the Task ID as their session, and
+model generations and tool calls are nested beneath the Agent run. Tracing disables
+itself safely when credentials are missing and masks configured credentials before export.
+
 <details>
 <summary><strong>Advanced configuration</strong></summary>
 
@@ -145,6 +151,11 @@ The backend reads `backend/.env` by default:
 | `AGENT_COCKPIT_MAX_CONCURRENT_RUNS` | `3` | Maximum number of active agent runs |
 | `AGENT_COCKPIT_COMMAND_TIMEOUT_SECONDS` | `120` | Per-command timeout in seconds |
 | `AGENT_COCKPIT_FRONTEND_ORIGIN` | `http://localhost:4173` | Frontend origin allowed to access the API |
+| `LANGFUSE_PUBLIC_KEY` | Empty | Langfuse project public key |
+| `LANGFUSE_SECRET_KEY` | Empty | Langfuse project secret key |
+| `LANGFUSE_BASE_URL` | `https://cloud.langfuse.com` | Langfuse Cloud region or self-hosted URL |
+| `AGENT_COCKPIT_LANGFUSE_ENABLED` | `true` | Enable tracing when both Langfuse keys exist |
+| `AGENT_COCKPIT_LANGFUSE_ENVIRONMENT` | `development` | Environment label attached to traces |
 
 Project paths support Windows backslashes, forward slashes, quoted paths, `~`, environment variables, and relative paths. On Windows, use `G:\Projects\my-app` or `G:/Projects/my-app`; the ambiguous form `G:Projects\my-app` is rejected.
 
@@ -223,6 +234,7 @@ agent-cockpit/
 
 ```powershell
 uv run ruff check backend
+uv run pyright
 uv run pytest --cov=backend/app --cov-report=term-missing
 pnpm --dir frontend lint
 pnpm --dir frontend test

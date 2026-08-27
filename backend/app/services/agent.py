@@ -11,15 +11,17 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Never
 from urllib.parse import urlparse
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
-from backend.app.domain.models import AgentResult, AgentResultStatus, TaskSpec
+from backend.app.core.telemetry import TraceScope
+from backend.app.domain.models import AgentCheck, AgentResult, AgentResultStatus, TaskSpec
 from backend.app.services.verification import RepositoryVerificationInspector
 
 EventCallback = Callable[[str, dict[str, Any]], None]
@@ -97,6 +99,7 @@ class WorkspaceTools:
         control: RunControl | None = None,
         record_check: CheckCallback | None = None,
         configured_checks: list[dict[str, Any]] | None = None,
+        trace_scope: TraceScope | None = None,
     ) -> None:
         self.workspace = workspace.resolve()
         self.timeout_seconds = timeout_seconds
@@ -104,8 +107,22 @@ class WorkspaceTools:
         self.control = control or RunControl()
         self.record_check = record_check
         self.configured_checks = configured_checks or []
+        self.trace_scope = trace_scope or TraceScope()
         self.executed_project_checks: set[str] = set()
         self.verification_inspector = RepositoryVerificationInspector()
+
+    def langchain_config(
+        self,
+        *,
+        run_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+    ) -> RunnableConfig | None:
+        return self.trace_scope.langchain_config(
+            run_name=run_name,
+            metadata=metadata,
+            tags=tags,
+        )
 
     def resolve(self, relative_path: str = ".") -> Path:
         candidate = Path(relative_path)
@@ -122,7 +139,7 @@ class WorkspaceTools:
             )
         return resolved
 
-    def _reject(self, reason: str, *, tool: str, target: str | None = None) -> None:
+    def _reject(self, reason: str, *, tool: str, target: str | None = None) -> Never:
         payload = {"tool": tool, "reason": reason}
         if target is not None:
             payload["target"] = target[:500]
@@ -430,7 +447,7 @@ class DemoAgentAdapter(AgentAdapter):
             status=AgentResultStatus.COMPLETED,
             summary="Created a deterministic observable demonstration change.",
             changes=["Created agent-cockpit-demo.md inside the isolated worktree"],
-            checks=[{"name": "git status", "status": "passed", "detail": status}],
+            checks=[AgentCheck(name="git status", status="passed", detail=status)],
         )
 
 
@@ -451,7 +468,7 @@ class BuiltinLangChainAgentAdapter(AgentAdapter):
     def _build_llm(self) -> Any:
         return ChatOpenAI(
             model=self.model,
-            api_key=self.api_key,
+            api_key=SecretStr(self.api_key),
             base_url=self.base_url,
             temperature=0,
         )
@@ -512,7 +529,16 @@ class BuiltinLangChainAgentAdapter(AgentAdapter):
                     "message": "正在根据当前 Task 状态选择下一步可观察动作。",
                 },
             )
-            response = await model_with_tools.ainvoke(messages)
+            planning_config = tools.langchain_config(
+                run_name="agent-planning",
+                metadata={"agent_step": step, "phase": "planning"},
+                tags=["agent-planning"],
+            )
+            response = (
+                await model_with_tools.ainvoke(messages, config=planning_config)
+                if planning_config
+                else await model_with_tools.ainvoke(messages)
+            )
             messages.append(response)
             if not response.tool_calls:
                 tools.emit(
@@ -555,7 +581,15 @@ class BuiltinLangChainAgentAdapter(AgentAdapter):
                     },
                 )
                 try:
-                    output = await selected.ainvoke(tool_call["args"])
+                    tool_config = tools.langchain_config(
+                        metadata={"agent_step": step, "phase": "acting"},
+                        tags=["agent-tool"],
+                    )
+                    output = (
+                        await selected.ainvoke(tool_call["args"], config=tool_config)
+                        if tool_config
+                        else await selected.ainvoke(tool_call["args"])
+                    )
                     step_status = "completed"
                 except Exception as error:  # tool failures are returned to the model
                     output = f"Tool error: {error}"
@@ -632,7 +666,16 @@ class BuiltinLangChainAgentAdapter(AgentAdapter):
                     include_raw=True,
                     strict=strict,
                 )
-                envelope = await finalizer.ainvoke(final_messages)
+                finalization_config = tools.langchain_config(
+                    run_name="agent-result-finalization",
+                    metadata={"attempt": index + 1, "method": method},
+                    tags=["agent-finalization"],
+                )
+                envelope = (
+                    await finalizer.ainvoke(final_messages, config=finalization_config)
+                    if finalization_config
+                    else await finalizer.ainvoke(final_messages)
+                )
                 parsed = envelope.get("parsed") if isinstance(envelope, dict) else envelope
                 if parsed is None:
                     parsing_error = (
@@ -692,7 +735,7 @@ class DeepSeekAgentAdapter(BuiltinLangChainAgentAdapter):
     def _build_llm(self) -> Any:
         return ChatOpenAI(
             model=self.model,
-            api_key=self.api_key,
+            api_key=SecretStr(self.api_key),
             base_url=self.base_url,
             temperature=0,
             extra_body={"thinking": {"type": "disabled"}},

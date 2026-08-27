@@ -88,7 +88,7 @@ class WorkspaceObserver:
     def _changes(self, workspace: Path, mapper: ModuleMapper) -> list[dict[str, Any]]:
         raw = self._git(workspace, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
         records = raw.decode(errors="replace").split("\0")
-        paths: list[tuple[str, str]] = []
+        paths: list[tuple[str, str, str | None]] = []
         index = 0
         while index < len(records):
             record = records[index]
@@ -111,7 +111,7 @@ class WorkspaceObserver:
                 status = "Modified"
             if path.startswith(".task/"):
                 continue
-            paths.append((path.replace("\\", "/"), status))
+            paths.append((path.replace("\\", "/"), status, previous_path))
 
         numstat: dict[str, tuple[int, int]] = {}
         raw_numstat = self._git(workspace, ["diff", "--numstat", "HEAD"])
@@ -122,7 +122,7 @@ class WorkspaceObserver:
                 int(deleted) if deleted.isdigit() else 0,
             )
         result = []
-        for path, status in paths:
+        for path, status, previous_path in paths:
             added, deleted = numstat.get(path, (0, 0))
             if status == "Created":
                 try:

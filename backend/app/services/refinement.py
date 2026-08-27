@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
+from backend.app.core.telemetry import LangfuseTelemetry, TraceScope
 from backend.app.domain.models import RefinementQuestion, TaskSpec
 
 IGNORED_DIRECTORIES = {
@@ -95,8 +97,13 @@ class RepositoryInspector:
 
 
 class RefinementService:
-    def __init__(self, inspector: RepositoryInspector | None = None) -> None:
+    def __init__(
+        self,
+        inspector: RepositoryInspector | None = None,
+        telemetry: LangfuseTelemetry | None = None,
+    ) -> None:
         self.inspector = inspector or RepositoryInspector()
+        self.telemetry = telemetry
 
     def questions(self, raw_request: str, round_number: int) -> list[RefinementQuestion]:
         if round_number > 2:
@@ -193,7 +200,7 @@ class RefinementService:
     ) -> RefinementAssessment:
         model = ChatOpenAI(
             model=provider["model"],
-            api_key=api_key,
+            api_key=SecretStr(api_key),
             base_url=provider.get("base_url"),
             temperature=0,
         ).with_structured_output(RefinementAssessment)
@@ -209,8 +216,33 @@ class RefinementService:
             f"Request:\n{raw_request}\n\n"
             f"Repository inspection:\n{json.dumps(inspection, ensure_ascii=False)[:24000]}"
         )
-        result = model.invoke(prompt)
-        return RefinementAssessment.model_validate(result)
+        trace_context = (
+            self.telemetry.trace(
+                name="task-refinement",
+                as_type="chain",
+                input={
+                    "request": raw_request,
+                    "repository": inspection.get("repository"),
+                    "files_scanned": inspection.get("files_scanned", 0),
+                },
+                metadata={
+                    "provider": provider.get("provider"),
+                    "model": provider.get("model"),
+                },
+                tags=["agent-cockpit", "task-refinement", str(provider.get("provider"))],
+            )
+            if self.telemetry
+            else nullcontext(TraceScope())
+        )
+        with trace_context as trace:
+            config = trace.langchain_config(
+                run_name="task-refinement-assessment",
+                metadata={"feature": "task-refinement"},
+            )
+            result = model.invoke(prompt, config=config) if config else model.invoke(prompt)
+            assessment = RefinementAssessment.model_validate(result)
+            trace.update(output=assessment.model_dump(mode="json"))
+            return assessment
 
     def _deterministic_assessment(
         self, raw_request: str, inspection: dict[str, Any]

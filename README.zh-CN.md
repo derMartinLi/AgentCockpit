@@ -132,6 +132,11 @@ AGENT_COCKPIT_MAX_CONCURRENT_RUNS=3
 
 启动后在 Settings 中选择模型 Provider、模型名称和可选的 OpenAI-compatible Base URL。API Key 仅从环境变量或系统凭据存储读取，不会写入 SQLite、Task Spec、Event 或 Agent Context。
 
+如需把 AI 调用追踪发送到 Langfuse，请同时在 `backend/.env` 中配置
+`LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY` 和对应区域的 `LANGFUSE_BASE_URL`。
+每次 Agent 运行对应一个 trace；resume 运行使用 Task ID 归入同一 session，模型调用和工具调用
+嵌套在 Agent 运行节点下。缺少凭据时追踪会安全关闭，发送前会遮蔽已配置的凭据。
+
 <details>
 <summary><strong>高级配置</strong></summary>
 
@@ -145,6 +150,11 @@ AGENT_COCKPIT_MAX_CONCURRENT_RUNS=3
 | `AGENT_COCKPIT_MAX_CONCURRENT_RUNS` | `3` | 同时活动的 Agent Run 上限 |
 | `AGENT_COCKPIT_COMMAND_TIMEOUT_SECONDS` | `120` | 单条命令超时秒数 |
 | `AGENT_COCKPIT_FRONTEND_ORIGIN` | `http://localhost:4173` | 允许访问 API 的前端来源 |
+| `LANGFUSE_PUBLIC_KEY` | 空 | Langfuse 项目 Public Key |
+| `LANGFUSE_SECRET_KEY` | 空 | Langfuse 项目 Secret Key |
+| `LANGFUSE_BASE_URL` | `https://cloud.langfuse.com` | Langfuse Cloud 区域或自托管地址 |
+| `AGENT_COCKPIT_LANGFUSE_ENABLED` | `true` | 同时存在两项 Langfuse Key 时启用追踪 |
+| `AGENT_COCKPIT_LANGFUSE_ENVIRONMENT` | `development` | 写入 trace 的环境标签 |
 
 Project 路径支持 Windows 反斜杠、正斜杠、引号包裹路径、`~`、环境变量和相对路径。Windows 下请使用 `G:\Projects\my-app` 或 `G:/Projects/my-app`；歧义形式 `G:Projects\my-app` 会被拒绝。
 
@@ -223,6 +233,7 @@ agent-cockpit/
 
 ```powershell
 uv run ruff check backend
+uv run pyright
 uv run pytest --cov=backend/app --cov-report=term-missing
 pnpm --dir frontend lint
 pnpm --dir frontend test

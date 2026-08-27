@@ -226,7 +226,9 @@ async def test_run_capacity_is_race_safe_and_failure_releases_only_its_slot(
     started_task_ids = {run["task_id"] for run in started_runs}
     denied_task = next(task for task in tasks if task["id"] not in started_task_ids)
     task_titles = {task["id"]: task["title"] for task in tasks}
-    assert container.tasks.get(denied_task["id"])["status"] == "READY"
+    denied_record = container.tasks.get(denied_task["id"])
+    assert denied_record is not None
+    assert denied_record["status"] == "READY"
     assert container.runs.list_for_task(denied_task["id"]) == []
     await asyncio.gather(
         *(adapter.started[task_titles[run["task_id"]]].wait() for run in started_runs)
@@ -238,7 +240,9 @@ async def test_run_capacity_is_race_safe_and_failure_releases_only_its_slot(
     adapter.release[failed_goal].set()
     failed_background = container.task_runtime.active_runs[failed_run["id"]]
     await failed_background
-    assert container.runs.get(failed_run["id"])["status"] == "FAILED"
+    failed_record = container.runs.get(failed_run["id"])
+    assert failed_record is not None
+    assert failed_record["status"] == "FAILED"
 
     fourth = await container.task_runtime.start(denied_task["id"])
     assert fourth["status"] == "RUNNING"
@@ -258,10 +262,14 @@ async def test_run_capacity_is_race_safe_and_failure_releases_only_its_slot(
     for goal in remaining_goals:
         adapter.release[goal].set()
     await asyncio.gather(*list(container.task_runtime.active_runs.values()))
-    assert all(
-        container.runs.get(run_id)["status"] == "COMPLETED"
+    completed_records = [
+        container.runs.get(run_id)
         for run_id in [
             *(run["id"] for run in started_runs if run["id"] != failed_run["id"]),
             fourth["id"],
         ]
+    ]
+    assert all(
+        record is not None and record["status"] == "COMPLETED"
+        for record in completed_records
     )

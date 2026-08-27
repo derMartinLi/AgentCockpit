@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from backend.app.core.config import Settings
 from backend.app.core.credentials import CredentialStore
+from backend.app.core.telemetry import LangfuseTelemetry, TraceScope
 from backend.app.domain.models import (
     AgentCheck,
     AgentResult,
@@ -205,6 +206,7 @@ class TaskRuntime:
         credentials: CredentialStore,
         workspaces: WorkspaceManager,
         observer: WorkspaceObserver,
+        telemetry: LangfuseTelemetry,
         adapter_override: AgentAdapter | None = None,
     ) -> None:
         self.settings = settings
@@ -218,6 +220,7 @@ class TaskRuntime:
         self.credentials = credentials
         self.workspaces = workspaces
         self.observer = observer
+        self.telemetry = telemetry
         self.adapter_override = adapter_override
         self.active_runs: dict[str, asyncio.Task[None]] = {}
         self.active_controls: dict[str, RunControl] = {}
@@ -312,6 +315,78 @@ class TaskRuntime:
         task_id = task["id"]
         project = self.projects.get(task["project_id"])
         assert project is not None
+        provider = self.providers.get()
+        spec = TaskSpec.model_validate(task["spec"])
+        tags = ["agent-cockpit", "agent-run", str(provider.get("provider"))]
+        if resume_context:
+            tags.append("resume")
+        with self.telemetry.trace(
+            name="agent-run",
+            as_type="agent",
+            input={
+                "task_spec": spec.model_dump(mode="json"),
+                "resume_instruction": resume_context.instruction if resume_context else None,
+            },
+            metadata={
+                "task_id": task_id,
+                "run_id": run_id,
+                "project_id": task["project_id"],
+                "provider": provider.get("provider"),
+                "model": provider.get("model"),
+                "resumed": resume_context is not None,
+                "previous_run_id": (
+                    resume_context.previous_run_id if resume_context else None
+                ),
+            },
+            session_id=task_id,
+            tags=tags,
+            trace_seed=run_id,
+        ) as trace:
+            result = await self._run_agent(
+                task=task,
+                project=project,
+                run_id=run_id,
+                control=control,
+                spec=spec,
+                trace_scope=trace,
+                resume_context=resume_context,
+            )
+            result = AgentResult.model_validate(
+                self._safe_payload(result.model_dump(mode="json"))
+            )
+            self.checks.record_result_checks(task_id, run_id, result.checks)
+            if result.status == AgentResultStatus.NEEDS_INPUT:
+                self.human_inputs.create(task_id, run_id, result.summary)
+            self.runs.finish(run_id, result)
+            status, phase = self._task_state_for_result(result)
+            self.tasks.update(task_id, status=status, runtime_phase=phase)
+            event_type = {
+                AgentResultStatus.COMPLETED: "AgentCompleted",
+                AgentResultStatus.CANCELLED: "AgentCancelled",
+                AgentResultStatus.NEEDS_INPUT: "HumanInputRequested",
+            }.get(result.status, "AgentFailed")
+            result_payload = result.model_dump(mode="json")
+            self._emit(task_id, run_id, event_type, "agent", result_payload)
+            level = self._trace_level_for_result(result)
+            trace.update(
+                output=result_payload,
+                metadata={"result_status": result.status.value},
+                level=level,
+                status_message=result.summary,
+            )
+
+    async def _run_agent(
+        self,
+        *,
+        task: dict[str, Any],
+        project: dict[str, Any],
+        run_id: str,
+        control: RunControl,
+        spec: TaskSpec,
+        trace_scope: TraceScope,
+        resume_context: AgentResumeContext | None,
+    ) -> AgentResult:
+        task_id = task["id"]
         tools = WorkspaceTools(
             Path(task["workspace_path"]),
             timeout_seconds=self.settings.command_timeout_seconds,
@@ -323,6 +398,7 @@ class TaskRuntime:
                 task_id, run_id, name, command, cwd, runner
             ),
             configured_checks=project.get("verification_commands", []),
+            trace_scope=trace_scope,
         )
         observation_stop = asyncio.Event()
         observation = asyncio.create_task(
@@ -332,7 +408,7 @@ class TaskRuntime:
         try:
             adapter = self._adapter()
             result = await adapter.execute(
-                spec=TaskSpec.model_validate(task["spec"]),
+                spec=spec,
                 environment_spec=project["environment_spec"],
                 tools=tools,
                 resume_context=resume_context,
@@ -375,19 +451,19 @@ class TaskRuntime:
         finally:
             observation_stop.set()
             await observation
-        result = AgentResult.model_validate(self._safe_payload(result.model_dump(mode="json")))
-        self.checks.record_result_checks(task_id, run_id, result.checks)
-        if result.status == AgentResultStatus.NEEDS_INPUT:
-            self.human_inputs.create(task_id, run_id, result.summary)
-        self.runs.finish(run_id, result)
-        status, phase = self._task_state_for_result(result)
-        self.tasks.update(task_id, status=status, runtime_phase=phase)
-        event_type = {
-            AgentResultStatus.COMPLETED: "AgentCompleted",
-            AgentResultStatus.CANCELLED: "AgentCancelled",
-            AgentResultStatus.NEEDS_INPUT: "HumanInputRequested",
-        }.get(result.status, "AgentFailed")
-        self._emit(task_id, run_id, event_type, "agent", result.model_dump(mode="json"))
+        return result
+
+    @staticmethod
+    def _trace_level_for_result(
+        result: AgentResult,
+    ) -> Literal["DEFAULT", "WARNING", "ERROR"]:
+        if result.status == AgentResultStatus.FAILED:
+            return "ERROR"
+        if result.status != AgentResultStatus.COMPLETED:
+            return "WARNING"
+        if result.needs_human or result.known_issues:
+            return "WARNING"
+        return "DEFAULT"
 
     async def _observe(
         self,

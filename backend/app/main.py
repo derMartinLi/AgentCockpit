@@ -56,6 +56,7 @@ def create_app(
             archive_jobs = list(container.archive_jobs.values())
             if archive_jobs:
                 await asyncio.wait(archive_jobs, timeout=10)
+            await asyncio.to_thread(container.telemetry.shutdown)
 
     application = FastAPI(
         title=resolved_settings.app_name,

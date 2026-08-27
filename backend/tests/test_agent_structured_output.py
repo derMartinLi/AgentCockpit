@@ -6,6 +6,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 import backend.app.services.agent as agent_module
+from backend.app.core.telemetry import TraceScope
 from backend.app.domain.models import AgentResultStatus, TaskSpec
 from backend.app.services.agent import (
     AgentResultOutput,
@@ -22,8 +23,11 @@ class FakeStructuredModel:
         self.owner = owner
         self.method = method
 
-    async def ainvoke(self, messages: list[Any]) -> dict[str, Any]:
+    async def ainvoke(
+        self, messages: list[Any], *, config: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         self.owner.final_messages = messages
+        self.owner.final_configs.append(config)
         if self.method in self.owner.failing_methods:
             raise RuntimeError(f"{self.method} is unavailable")
         return {
@@ -45,8 +49,11 @@ class FakeExecutionModel:
     def __init__(self, owner: FakeChatModel) -> None:
         self.owner = owner
 
-    async def ainvoke(self, messages: list[Any]) -> AIMessage:
+    async def ainvoke(
+        self, messages: list[Any], *, config: dict[str, Any] | None = None
+    ) -> AIMessage:
         self.owner.execution_messages = messages
+        self.owner.execution_configs.append(config)
         return AIMessage(content="Everything is complete and tests pass.")
 
 
@@ -59,6 +66,8 @@ class FakeChatModel:
         self.methods: list[tuple[str, bool | None]] = []
         self.execution_messages: list[Any] = []
         self.final_messages: list[Any] = []
+        self.execution_configs: list[dict[str, Any] | None] = []
+        self.final_configs: list[dict[str, Any] | None] = []
         self.failing_methods = set(type(self).failing_methods)
         type(self).instances.append(self)
 
@@ -79,11 +88,17 @@ class FakeChatModel:
         return FakeStructuredModel(self, method)
 
 
-def make_tools(tmp_path: Any, events: list[tuple[str, dict[str, Any]]]) -> WorkspaceTools:
+def make_tools(
+    tmp_path: Any,
+    events: list[tuple[str, dict[str, Any]]],
+    *,
+    trace_scope: TraceScope | None = None,
+) -> WorkspaceTools:
     return WorkspaceTools(
         tmp_path,
         timeout_seconds=1,
         emit=lambda event_type, payload: events.append((event_type, payload)),
+        trace_scope=trace_scope,
     )
 
 
@@ -149,6 +164,38 @@ async def test_openai_compatible_provider_uses_function_calling_finalizer(
 
     assert result.status == AgentResultStatus.COMPLETED
     assert FakeChatModel.instances[0].methods == [("function_calling", None)]
+
+
+@pytest.mark.asyncio
+async def test_langfuse_callback_config_reaches_planning_and_finalization(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    FakeChatModel.instances = []
+    FakeChatModel.failing_methods = set()
+    monkeypatch.setattr(agent_module, "ChatOpenAI", FakeChatModel)
+    callback = object()
+    adapter = BuiltinLangChainAgentAdapter(model="gpt-test", api_key="secret")
+
+    result = await adapter.execute(
+        spec=make_spec(),
+        environment_spec="",
+        tools=make_tools(tmp_path, [], trace_scope=TraceScope(callbacks=(callback,))),
+    )
+
+    model = FakeChatModel.instances[0]
+    assert result.status == AgentResultStatus.COMPLETED
+    assert model.execution_configs[0] == {
+        "callbacks": [callback],
+        "run_name": "agent-planning",
+        "metadata": {"agent_step": 1, "phase": "planning"},
+        "tags": ["agent-planning"],
+    }
+    assert model.final_configs[0] == {
+        "callbacks": [callback],
+        "run_name": "agent-result-finalization",
+        "metadata": {"attempt": 1, "method": "json_schema"},
+        "tags": ["agent-finalization"],
+    }
 
 
 @pytest.mark.asyncio

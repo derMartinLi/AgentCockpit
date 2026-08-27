@@ -49,6 +49,7 @@ def settings(tmp_path: Path) -> Settings:
         database_path=tmp_path / "cockpit-data" / "test.db",
         command_timeout_seconds=1,
         api_key="test-secret-from-environment",
+        langfuse_enabled=False,
     )
 
 
